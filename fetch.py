@@ -4,6 +4,7 @@ Talks to the OSM API, Overpass, and (optionally) osmcha to find
 down the data needed to run checks on them.
 """
 import logging
+import time
 from datetime import datetime
 
 import requests
@@ -56,13 +57,34 @@ def overpass_circuit_is_open():
     return _overpass_consecutive_failures >= _OVERPASS_CIRCUIT_THRESHOLD
 
 
-def _get(url, params=None, headers=None, timeout=60):
+def _get(url, params=None, headers=None, timeout=60, max_attempts=3):
+    """
+    Light retry wrapper for OSM API calls. The OSM API is normally very
+    reliable, but does occasionally have a brief hiccup (a 503, a slow
+    first byte). Without any retry here, that single brief blip used to
+    crash the entire run -- including throwing away real work already
+    completed earlier in that same run (e.g. a fully-processed retry
+    queue) purely because nothing gets saved until the very end. A
+    couple of quick retries absorb the vast majority of these blips
+    without meaningfully slowing down the normal, successful case.
+    """
     h = dict(HEADERS)
     if headers:
         h.update(headers)
-    resp = requests.get(url, params=params, headers=h, timeout=timeout)
-    resp.raise_for_status()
-    return resp
+    last_exc = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            resp = requests.get(url, params=params, headers=h, timeout=timeout)
+            resp.raise_for_status()
+            return resp
+        except requests.RequestException as e:
+            last_exc = e
+            if attempt < max_attempts:
+                wait = 2 * attempt
+                log.info("OSM API request failed (attempt %d/%d): %s -- retrying in %ds",
+                         attempt, max_attempts, e, wait)
+                time.sleep(wait)
+    raise last_exc
 
 
 def _parse_osm_dt(s):
