@@ -208,4 +208,17 @@ def run():
 
 
 if __name__ == "__main__":
-    run()
+    try:
+        run()
+    except Exception:
+        # By this point, retry-queue progress has already been checkpointed
+        # to disk (see the save immediately after retry_pending() above),
+        # and if this failure happened before the new window was ever
+        # determined, last_run_end_utc was never advanced -- so the next
+        # run will simply retry the exact same window from scratch.
+        # Nothing is lost either way. Logging and exiting cleanly (rather
+        # than crashing with a non-zero exit code) avoids marking every
+        # brief external hiccup as a failed Action run when the system is
+        # already designed to absorb it gracefully.
+        log.exception("Run did not complete due to an unexpected error -- "
+                       "already-saved progress is safe; the next run will retry what's left")
