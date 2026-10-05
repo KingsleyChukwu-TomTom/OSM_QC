@@ -1,19 +1,7 @@
 [
   {
-    "changeset_id": 189409741,
-    "overpass_attempts": 11,
-    "meta_fetch_failures": 0,
-    "first_flagged_utc": "2026-09-23T15:04:55.042211+00:00"
-  },
-  {
-    "changeset_id": 189409727,
-    "overpass_attempts": 9,
-    "meta_fetch_failures": 0,
-    "first_flagged_utc": "2026-09-23T15:04:55.532644+00:00"
-  },
-  {
     "changeset_id": 189409712,
-    "overpass_attempts": 9,
+    "overpass_attempts": 10,
     "meta_fetch_failures": 0,
     "first_flagged_utc": "2026-09-23T15:04:55.728426+00:00"
   },
