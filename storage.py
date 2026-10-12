@@ -16,10 +16,11 @@ import config
 FIELDNAMES = [
     "s_no", "error_type", "username", "user_id", "osm_location_link",
     "changeset_id", "changeset_link", "osm_object_type", "osm_object_id",
-    "time_utc", "country", "detail",
+    "time_utc", "country", "detail", "hashtag",
 ]
 
 PENDING_RECHECK_FILE = os.path.join(config.DATA_DIR, "pending_overpass_recheck.json")
+PENDING_SCAN_FILE = os.path.join(config.DATA_DIR, "pending_changeset_scans.json")
 
 
 def ensure_data_dir():
@@ -60,6 +61,29 @@ def load_pending_rechecks():
 def save_pending_rechecks(pending_list):
     ensure_data_dir()
     with open(PENDING_RECHECK_FILE, "w") as f:
+        json.dump(pending_list, f, indent=2)
+
+
+def load_pending_scans():
+    """
+    Returns the list of time-ranges that couldn't be scanned for
+    changesets because the underlying OSM API query persistently failed
+    (not a brief blip -- already retried, still failing). Each entry is
+    {"start", "end", "attempts"}. Empty list if none are pending.
+    """
+    ensure_data_dir()
+    if not os.path.exists(PENDING_SCAN_FILE):
+        return []
+    try:
+        with open(PENDING_SCAN_FILE) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def save_pending_scans(pending_list):
+    ensure_data_dir()
+    with open(PENDING_SCAN_FILE, "w") as f:
         json.dump(pending_list, f, indent=2)
 
 

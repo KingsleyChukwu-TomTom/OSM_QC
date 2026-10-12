@@ -478,7 +478,7 @@ def check_overlapping_highways(new_highways, context_highways):
     return issues
 
 
-def check_node_connects_highway_and_building(building_ways, highway_ways):
+def check_node_connects_highway_and_building(new_buildings, context_buildings, new_highways, context_highways):
     """
     A shared node between a highway and a building is usually a mistake
     -- except when the highway segment there is tagged covered=yes,
@@ -486,26 +486,40 @@ def check_node_connects_highway_and_building(building_ways, highway_ways):
     under or through a structure (a covered passage, an archway, a road
     running beneath part of a building). That case is correct as-is and
     must not be flagged.
+
+    IMPORTANT: context (pre-existing, nearby) buildings and highways are
+    included so a new edit can be checked against what's already there --
+    but a finding must always involve at least one NEW element (created
+    or modified by THIS changeset). Without that requirement, two purely
+    pre-existing objects that happen to share a node -- something this
+    changeset never touched at all -- would get flagged and wrongly
+    attributed to whoever's edit merely happened to fall nearby.
     """
+    new_building_ids = {b["id"] for b in new_buildings}
+    new_highway_ids = {h["id"] for h in new_highways}
+
     issues = []
     building_nodes = {}
-    for b in building_ways:
+    for b in new_buildings + context_buildings:
         for n in b["nodes"]:
             building_nodes.setdefault(n, []).append(b["id"])
 
     flagged = set()
-    for h in highway_ways:
+    for h in new_highways + context_highways:
         if h.get("tags", {}).get("covered") == "yes":
             continue  # intentional: road passes under/through a structure
         for n in h["nodes"]:
             if n in building_nodes and n not in flagged:
+                building_id = building_nodes[n][0]
+                if h["id"] not in new_highway_ids and building_id not in new_building_ids:
+                    continue  # neither side was touched by this changeset -- not this user's issue
                 flagged.add(n)
                 geom = h.get("_geom")
                 if geom is None:
                     continue
                 lat, lon = geo_utils.centroid_of(geom)
                 issues.append(Issue("node connected highway and building", "node", n, lat, lon,
-                                     detail=f"shared by highway way {h['id']} and building way {building_nodes[n][0]}"))
+                                     detail=f"shared by highway way {h['id']} and building way {building_id}"))
     return issues
 
 
@@ -599,8 +613,16 @@ def check_broken_highway_continuity(new_highways, context_highways):
     almost certainly meant to be the same continuous road) whose
     endpoints sit close together but don't actually share a node -- the
     road LOOKS continuous on screen but has a genuine topological break.
+
+    IMPORTANT: a flagged pair must always include at least one NEW way
+    (created or modified by THIS changeset). Without that requirement,
+    two purely pre-existing segments sharing a name -- a break this
+    changeset never touched or introduced -- would get flagged and
+    wrongly attributed to whoever's unrelated edit happened to fall
+    nearby.
     """
     issues = []
+    new_highway_ids = {h["id"] for h in new_highways}
     all_highways = new_highways + context_highways
 
     def road_key(w):
@@ -621,6 +643,8 @@ def check_broken_highway_continuity(new_highways, context_highways):
             geom1 = w1["_geom"]
             endpoints1 = [(geom1.coords[0], w1["nodes"][0]), (geom1.coords[-1], w1["nodes"][-1])]
             for w2 in ways[i + 1:]:
+                if w1["id"] not in new_highway_ids and w2["id"] not in new_highway_ids:
+                    continue  # neither side was touched by this changeset -- not this user's issue
                 if set(w1["nodes"]) & set(w2["nodes"]):
                     continue  # already properly connected
                 geom2 = w2["_geom"]
@@ -641,17 +665,23 @@ def check_broken_highway_continuity(new_highways, context_highways):
     return issues
 
 
-def check_floating_highway(new_highways, context_highways):
+def check_floating_highway(new_highways, context_highways, fetch_module=None):
     """
-    Flags a highway way where NEITHER endpoint connects to any other
-    highway -- isolated from the road network on both ends, and not
-    tagged as a legitimate dead end.
+    Flags a highway way that is purely isolated: NEITHER endpoint
+    connects to any other highway -- not one end, both ends -- and it's
+    not tagged as a legitimate dead end.
 
-    Known limitation: Overpass context only covers a small buffer around
-    this changeset's own bounding box. A genuinely-connected road whose
-    neighbour happens to sit just outside that buffer could be
-    misreported as floating -- worth keeping in mind for ways near the
-    edge of a changeset's area until this is refined further.
+    The local ~50m Overpass context alone isn't always enough to be
+    sure of that: a genuinely-connected road's real neighbour can sit
+    just outside that small buffer, which would otherwise make it look
+    falsely isolated. So before actually confirming a candidate as
+    floating, if fetch_module is given, each endpoint is double-checked
+    with a precise, distance-independent query ("what ways anywhere use
+    this exact node?") -- if that finds a connection the local buffer
+    missed, or if the check itself couldn't be confirmed either way,
+    the candidate is NOT flagged. This trades a small amount of extra
+    verification for eliminating this specific false-positive source
+    entirely, rather than just noting it as a known limitation.
     """
     all_highways = new_highways + context_highways
     node_to_ways = {}
@@ -668,10 +698,23 @@ def check_floating_highway(new_highways, context_highways):
         start_connections = node_to_ways.get(nodes[0], set()) - {w["id"]}
         end_connections = node_to_ways.get(nodes[-1], set()) - {w["id"]}
         if start_connections or end_connections:
-            continue  # connected at at least one end
+            continue  # connected at at least one end, within local context
 
         if w.get("tags", {}).get("noexit") == "yes":
             continue  # explicitly marked as a legitimate dead end
+
+        if fetch_module is not None:
+            confirmed_isolated = True
+            for endpoint_node in (nodes[0], nodes[-1]):
+                real_ways = fetch_module.fetch_ways_using_node(endpoint_node)
+                if real_ways is None or (real_ways - {w["id"]}):
+                    # Either we couldn't confirm isolation, or the wider,
+                    # precise check found a real connection the small
+                    # local buffer missed -- either way, don't flag it.
+                    confirmed_isolated = False
+                    break
+            if not confirmed_isolated:
+                continue
 
         lat, lon = geo_utils.centroid_of(geom)
         issues.append(Issue(
@@ -750,9 +793,9 @@ def run_overpass_dependent_checks(cs_meta, new_ways, diff, fetch_module):
     issues += check_overlapping_highways(new_highways, context_highways)
     issues += check_sudden_highway_classification_change(new_highways, context_highways)
     issues += check_broken_highway_continuity(new_highways, context_highways)
-    issues += check_floating_highway(new_highways, context_highways)
+    issues += check_floating_highway(new_highways, context_highways, fetch_module)
     issues += check_node_connects_highway_and_building(
-        new_buildings + context_buildings, new_highways + context_highways,
+        new_buildings, context_buildings, new_highways, context_highways,
     )
     issues += check_endpoint_near_other_way(new_ways, context_ways)
 
@@ -805,4 +848,5 @@ def to_row(cs_meta, issue: Issue):
         "time_utc": cs_meta.get("closed_at") or cs_meta.get("created_at"),
         "country": country,
         "detail": issue.detail,
+        "hashtag": config.HASHTAG,
     }
